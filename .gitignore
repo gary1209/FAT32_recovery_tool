@@ -1,0 +1,6 @@
+.vscode/
+nyuenc
+*.o
+.DS_Store
+nyufile.zip
+nyufile-autograder/
