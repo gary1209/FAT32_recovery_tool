@@ -5,6 +5,7 @@ CFLAGS= -g -pedantic -std=gnu17 -Wall -Werror -Wextra -lm -lcrypto
 all: nyufile
 
 nyufile: nyufile.o argparse.o
+	$(CC) -o nyufile nyufile.o argparse.o $(CFLAGS)
 
 nyufile.o: nyufile.c argparse.h
 

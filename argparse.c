@@ -5,6 +5,7 @@
 #include <unistd.h> 
 #include <string.h>
 #include <fcntl.h>
+#include <math.h>
 
 #include "argparse.h"
 
@@ -59,6 +60,14 @@ int get_fat_entry(void *data, unsigned int clus_num) {
     unsigned char *entry = (unsigned char*)data + reserved_area;
     int *fat = (int*) entry;
     return fat[clus_num];
+}
+
+void set_fat_entry(void *data, unsigned int clus_num, unsigned int next_clus) {
+    BootEntry *ptr = (BootEntry *)data;
+    unsigned int reserved_area = ptr->BPB_BytsPerSec * ptr->BPB_RsvdSecCnt;
+    unsigned char *entry = (unsigned char*)data + reserved_area;
+    int *fat = (int*) entry;
+    fat[clus_num] = (int) next_clus;
 }
 
 void print_fs_info(void *data) {
@@ -116,6 +125,64 @@ void list_root_dir(void *data) {
     printf("Total number of entries = %d\n", num_entries);
 }
 
+void recover_cont_file (void *data, char *filename) {
+    BootEntry *ptr = (BootEntry *)data;
+    unsigned int root_clus_num = ptr->BPB_RootClus;
+    unsigned int clus_num = root_clus_num;
+    int clus_size = ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec;
+    int is_recovered = 0;
+    char deleted_name[13];
+    strncpy(deleted_name, filename, 13);
+    deleted_name[0] = (char)0xe5;
+    while (clus_num < 0x0ffffff8) {
+        unsigned int reserved_area_size = ptr->BPB_BytsPerSec * ptr->BPB_RsvdSecCnt;
+        unsigned int fat_area_size = ptr->BPB_NumFATs * ptr->BPB_FATSz32 * ptr->BPB_BytsPerSec; 
+        unsigned char *clus_data = (unsigned char *)data + reserved_area_size + fat_area_size + ((clus_num - 2) * ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec);
+        for (int i = 0; i < ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec; i+=32) {
+            DirEntry *dir = (DirEntry *)(clus_data + i);
+            char readable_name[13];
+            convert_filename(dir->DIR_Name, readable_name);
+            // Only check deleted entries that are not directories
+            if (dir->DIR_Name[0] == 0xe5 || dir->DIR_Attr != 0x10) {
+                if (DEBUG) {
+                    int res = strncmp(deleted_name, readable_name, 13);
+                    printf("delete_name: %s, name: %s, res:%d\n",deleted_name, dir->DIR_Name, res);
+                }
+                
+                if (strncmp(deleted_name, readable_name, 13) == 0) {
+                    is_recovered = 1;
+                    dir->DIR_Name[0] = filename[0];
+                    
+                    int start_clus = convert_cluster(dir->DIR_FstClusHI, dir->DIR_FstClusLO);
+                    int clus_used = ceil((double)dir->DIR_FileSize/clus_size);
+                    
+                    if (DEBUG) {
+                        printf("cover back to: %s\n", dir->DIR_Name);
+                        printf("file size: %d, clus_size: %d, clus_used: %d\n", dir->DIR_FileSize, clus_size, clus_used);
+                    }
+
+                    if (clus_used == 1) {
+                        set_fat_entry(data, start_clus, 0x0ffffff8);
+                    } 
+                    if (clus_used > 1) {
+                        for (int i = 0; i < (clus_used - 1); i++) {
+                            set_fat_entry(data, start_clus, start_clus+1);
+                            start_clus += 1;
+                        }
+                        set_fat_entry(data, start_clus, 0x0ffffff8);
+                    }
+                }
+            }
+        }
+        clus_num = get_fat_entry(data, clus_num);
+    }
+    if (is_recovered) {
+        printf("%s: successfully recovered\n", filename);
+    } else {
+        printf("%s: file not found\n", filename);
+    }
+}
+
 
 void print_usage() {
     printf("Usage: ./nyufile disk <options>\n");
@@ -151,6 +218,8 @@ void parse_args(int argc, char *argv[], char *disk_name) {
     int flag_R = 0;
     int flag_s = 0;
     void *data = NULL;
+    char *filename = NULL;
+    char *sha = NULL;
 
     while((opt = getopt(argc, argv, "ilr:R:s:")) != -1) 
     { 
@@ -168,6 +237,7 @@ void parse_args(int argc, char *argv[], char *disk_name) {
                     print_usage();
                     exit(1);
                 }
+                filename = optarg;
                 break;
             case 'R':
                 flag_R = 1;
@@ -175,6 +245,7 @@ void parse_args(int argc, char *argv[], char *disk_name) {
                     print_usage();
                     exit(1);
                 }
+                filename = optarg;
                 break;
             case 's':
                 flag_s = 1;
@@ -182,6 +253,7 @@ void parse_args(int argc, char *argv[], char *disk_name) {
                     print_usage();
                     exit(1);
                 }
+                sha = optarg;
                 break;
             
             default:
@@ -196,14 +268,23 @@ void parse_args(int argc, char *argv[], char *disk_name) {
     strcpy(disk_name, argv[optind]);
     
     validate_flags(flag_i, flag_l, flag_r, flag_R, flag_s);
+    
+    open_disk(disk_name, &data);
 
     if (flag_i) {
-        open_disk(disk_name, &data);
         print_fs_info(data);
     }
     
     if (flag_l) {
-        open_disk(disk_name, &data);
         list_root_dir(data);
+    }
+
+    if (flag_r && !flag_s) {
+        recover_cont_file(data, filename);
+    }
+
+    if (flag_r && flag_s) {
+        recover_cont_file(data, filename);
+        printf("sha :%s\n", sha);
     }
 }
