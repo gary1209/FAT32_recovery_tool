@@ -6,6 +6,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <math.h>
+#include <openssl/sha.h>
 
 #include "argparse.h"
 
@@ -123,6 +124,106 @@ void list_root_dir(void *data) {
         clus_num = get_fat_entry(data, clus_num);
     }
     printf("Total number of entries = %d\n", num_entries);
+}
+
+int is_ambiguous(void *data, const char *filename) {
+    int cnt = 0;
+    BootEntry *ptr = (BootEntry *)data;
+    unsigned int root_clus_num = ptr->BPB_RootClus;
+    unsigned int clus_num = root_clus_num;
+    char deleted_name[13];
+    strncpy(deleted_name, filename, 13);
+    deleted_name[0] = (char)0xe5;
+    while (clus_num < 0x0ffffff8) {
+        unsigned int reserved_area_size = ptr->BPB_BytsPerSec * ptr->BPB_RsvdSecCnt;
+        unsigned int fat_area_size = ptr->BPB_NumFATs * ptr->BPB_FATSz32 * ptr->BPB_BytsPerSec; 
+        unsigned char *clus_data = (unsigned char *)data + reserved_area_size + fat_area_size + ((clus_num - 2) * ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec);
+        for (int i = 0; i < ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec; i+=32) {
+            DirEntry *dir = (DirEntry *)(clus_data + i);
+            char readable_name[13];
+            convert_filename(dir->DIR_Name, readable_name);
+            // Only check deleted entries that are not directories
+            if (dir->DIR_Name[0] == 0xe5 || dir->DIR_Attr != 0x10) {
+                if (strncmp(deleted_name, readable_name, 13) == 0) {
+                    cnt += 1;
+                }
+            }
+        }
+        clus_num = get_fat_entry(data, clus_num);
+    }
+    return cnt > 1 ? 1 : 0;
+}
+
+void recover_cont_file_sha(void *data, char *filename, char *sha) {
+    // printf("Recovering wiht sha: %s, %s, %p\n", filename, sha, data);
+    BootEntry *ptr = (BootEntry *)data;
+    unsigned int root_clus_num = ptr->BPB_RootClus;
+    unsigned int clus_num = root_clus_num;
+    int clus_size = ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec;
+    int is_recovered = 0;
+    char deleted_name[13];
+    strncpy(deleted_name, filename, 13);
+    deleted_name[0] = (char)0xe5;
+
+    while (clus_num < 0x0ffffff8) {
+        unsigned int reserved_area_size = ptr->BPB_BytsPerSec * ptr->BPB_RsvdSecCnt;
+        unsigned int fat_area_size = ptr->BPB_NumFATs * ptr->BPB_FATSz32 * ptr->BPB_BytsPerSec; 
+        unsigned char *clus_data = (unsigned char *)data + reserved_area_size + fat_area_size + ((clus_num - 2) * ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec);
+        for (int i = 0; i < ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec; i+=32) {
+            DirEntry *dir = (DirEntry *)(clus_data + i);
+            char readable_name[13];
+            convert_filename(dir->DIR_Name, readable_name);
+            unsigned char md[20];
+            unsigned char target[20];
+            // init with empty sha value
+            char *empty_sha = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+            for (int i = 0; i < 20; i++) {
+                sscanf(&empty_sha[i * 2], "%2hhx", &md[i]);
+                sscanf(&sha[i * 2], "%2hhx", &target[i]);
+            }
+
+            // Only check deleted entries that are not directories
+            if (dir->DIR_Name[0] == 0xe5 || dir->DIR_Attr != 0x10) {                
+                if (strncmp(deleted_name, readable_name, 13) == 0) {
+                    // calulate sha
+                    if (dir->DIR_FileSize != 0) {
+                        int clus = convert_cluster(dir->DIR_FstClusHI, dir->DIR_FstClusLO);
+                        unsigned char *f = (unsigned char *)data + reserved_area_size + fat_area_size + ((clus - 2) * ptr->BPB_SecPerClus * ptr->BPB_BytsPerSec);
+                        SHA1((unsigned char *)f, (size_t)dir->DIR_FileSize, md);
+                    } 
+                    
+                    if (memcmp(target, md, SHA_DIGEST_LENGTH) != 0) {
+                        continue;
+                    }
+
+
+                    is_recovered = 1;
+                    dir->DIR_Name[0] = filename[0];
+                    
+                    int start_clus = convert_cluster(dir->DIR_FstClusHI, dir->DIR_FstClusLO);
+                    int clus_used = ceil((double)dir->DIR_FileSize/clus_size);
+
+                    if (clus_used == 1) {
+                        set_fat_entry(data, start_clus, 0x0ffffff8);
+                    } 
+                    if (clus_used > 1) {
+                        for (int i = 0; i < (clus_used - 1); i++) {
+                            set_fat_entry(data, start_clus, start_clus+1);
+                            start_clus += 1;
+                        }
+                        set_fat_entry(data, start_clus, 0x0ffffff8);
+                    }
+                }
+            }
+        }
+        clus_num = get_fat_entry(data, clus_num);
+    }
+
+    if (is_recovered) {
+        printf("%s: successfully recovered with SHA-1\n", filename);
+    } else {
+        printf("%s: file not found\n", filename);
+    }
 }
 
 void recover_cont_file (void *data, char *filename) {
@@ -280,11 +381,19 @@ void parse_args(int argc, char *argv[], char *disk_name) {
     }
 
     if (flag_r && !flag_s) {
-        recover_cont_file(data, filename);
+        if (is_ambiguous(data, filename)) {
+            printf("%s: multiple candidates found\n", filename);
+        } else {
+            recover_cont_file(data, filename);
+        }
     }
 
     if (flag_r && flag_s) {
-        recover_cont_file(data, filename);
-        printf("sha :%s\n", sha);
+        recover_cont_file_sha(data, filename, sha);
+    }
+
+    if (flag_R && flag_s) {
+        // recover_cont_file(data, filename);
+        printf("%s: file not found\n", filename);
     }
 }
