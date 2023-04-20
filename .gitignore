@@ -1,5 +1,5 @@
 .vscode/
-nyuenc
+nyufile
 *.o
 .DS_Store
 nyufile.zip
