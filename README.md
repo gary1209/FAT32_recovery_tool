@@ -18,7 +18,6 @@ This tool is designed to work on a FAT32 disk image.
 -r filename [-s sha1]  Recover a contiguous file.\
 -R filename -s sha1    Recover a possibly non-contiguous file.\
 
-
 You can create a FAT32 disk image by following the steps provided below:
 
 Create an empty file of a certain size using the dd command on Linux.
