@@ -10,12 +10,14 @@ This tool provides a platform to learn the internals of the FAT32 file system. I
 
 ## Usage
 This tool is designed to work on a FAT32 disk image. 
+```bash
+./nyufile disk <options>
+```
+-i                     Print the file system information.
+-l                     List the root directory.
+-r filename [-s sha1]  Recover a contiguous file.
+-R filename -s sha1    Recover a possibly non-contiguous file.
 
-Usage: ./nyufile disk <options>
-  -i                     Print the file system information.
-  -l                     List the root directory.
-  -r filename [-s sha1]  Recover a contiguous file.
-  -R filename -s sha1    Recover a possibly non-contiguous file.
 
 You can create a FAT32 disk image by following the steps provided below:
 
